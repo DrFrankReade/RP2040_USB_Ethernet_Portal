@@ -69,9 +69,13 @@
 #ifndef RP2040_USB_PORTAL_DHCP_DOMAIN
 #define RP2040_USB_PORTAL_DHCP_DOMAIN "rp2040.local"
 #endif
+#ifndef RP2040_USB_PORTAL_ENABLE_DHCP
+#define RP2040_USB_PORTAL_ENABLE_DHCP 1
+#endif
 
 /* Android behaved best in testing when DHCP advertised the device as router
- * and DNS, even though the link is only for local portal access. */
+ * and DNS, even though the link is only for local portal access. This is used
+ * only when the DHCP server is enabled. */
 #ifndef RP2040_USB_PORTAL_ADVERTISE_GATEWAY
 #define RP2040_USB_PORTAL_ADVERTISE_GATEWAY 1
 #endif

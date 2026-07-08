@@ -24,11 +24,11 @@ This is a proof of concept. It is not a production USB product identity, securit
 
 - Enumerates as a USB network device.
 - Hosts the device at `192.168.4.1/24`.
-- Runs a DHCP server with leases at `192.168.4.2` through `192.168.4.4`.
+- Runs a DHCP server with leases at `192.168.4.2` through `192.168.4.4` by default.
 - Advertises DNS and router options through DHCP for captive-portal behavior.
-- Answers all DNS queries with `192.168.4.1`.
+- Can answer all DNS queries with `192.168.4.1`.
 - Provides a small reusable C API around the USB network portal.
-- Serves a minimal HTTP control page and JSON API through an application callback.
+- Can serve a minimal HTTP control page and JSON API through an application callback.
 - Supports multiple USB network personalities selected at compile time.
 
 ## Hardware
@@ -55,7 +55,7 @@ The reusable layer lives in:
 
 The application calls `rp2040_usb_portal_config_init()`, optionally changes the returned config, assigns an HTTP handler, calls `rp2040_usb_portal_init()`, then calls `rp2040_usb_portal_task()` from the main loop.
 
-The portal owns the USB network device, LwIP netif, DHCP server, DNS catch-all, basic HTTP server, `/api/bootloader`, and adaptive Windows/Android USB persona switching. Application code owns routes, page content, and any hardware-specific control policy.
+The portal owns the USB network device, LwIP netif, optional DHCP server, optional DNS catch-all, optional basic HTTP server, `/api/bootloader`, and adaptive Windows/Android USB persona switching. Application code owns routes, page content, and any hardware-specific control policy.
 
 The active example is `src/example_portal_app.c`.
 
@@ -76,6 +76,14 @@ The recommended default is `pico-portal-auto`.
 | `kb2040-bootsel` | Adafruit KB2040 | BOOTSEL upload profile using `picotool` | Manual USB mass-storage style flashing |
 
 The board selection is intentionally left to PlatformIO's `board = ...` setting. The example does not repeat per-board GPIO declarations. For the demo LED, it uses `PICO_DEFAULT_LED_PIN` when the selected Pico SDK board header provides one. For a board without that macro, either register project-specific pins in the application or add a deliberate build flag such as `-DPORTAL_EXAMPLE_LED_GPIO=10`.
+
+`platformio.ini` keeps the board and USB behavior choices separate:
+
+- `[boards]` names the PlatformIO board IDs used by the environments.
+- `[mode_auto]` is the recommended Windows/Android image. It starts as CDC-ECM for Android, then switches to RNDIS when Windows probing is detected.
+- `[mode_android_ecm]` is CDC-ECM only. Use it when Android/Linux matter and Windows in-box compatibility does not.
+- `[mode_windows_ncm]` is CDC-NCM only. Use it when Windows is the target and the cleaner NCM adapter identity matters.
+- RNDIS has no explicit mode block because it is the default when no `USB_NET_MODE_*` flag is set. Use the `*-windows-rndis` environments as Windows fallbacks or for comparison.
 
 Flash size also comes from the selected PlatformIO board metadata and Pico SDK board header. If a custom board definition is wrong, override both the PlatformIO size check and the SDK macro in that board environment, for example:
 
@@ -142,12 +150,73 @@ Default values:
 
 - Portal IP: `192.168.4.1`
 - Netmask: `255.255.255.0`
+- DHCP server: enabled
 - DHCP leases: `192.168.4.2` through `192.168.4.4`
 - DHCP domain: `rp2040.local`
 - DNS: catch-all to the portal IP
 - DHCP router option: portal IP
 
 Projects can override the `RP2040_USB_PORTAL_*` macros in build flags or modify the `rp2040_usb_portal_config_t` before calling `rp2040_usb_portal_init()`. Lower-level LwIP pool and buffer sizes also have `RP2040_USB_PORTAL_LWIP_*` defaults in the same config header.
+
+Example runtime override:
+
+```c
+rp2040_usb_portal_config_t config;
+rp2040_usb_portal_config_init(&config);
+
+config.address = RP2040_USB_PORTAL_IPV4(10, 55, 0, 1);
+config.dhcp_lease_start = RP2040_USB_PORTAL_IPV4(10, 55, 0, 2);
+config.dhcp_router = config.address;
+config.dns_server = config.address;
+```
+
+## Integration Modes
+
+The library does not require every project to behave like a captive portal.
+
+For a full captive portal, keep the defaults, assign `config.http_handler`, and call `rp2040_usb_portal_task()` from the main loop. This gives the host an address by DHCP, catches DNS, and serves the page at `http://192.168.4.1/`.
+
+For a plain USB network interface with DHCP, disable the captive pieces and keep DHCP enabled:
+
+```c
+rp2040_usb_portal_config_t config;
+rp2040_usb_portal_config_init(&config);
+
+config.enable_dns_catchall = false;
+config.enable_http_server = false;
+
+rp2040_usb_portal_init(&config);
+```
+
+The RP2040 still comes up at the configured device IP, the host still gets a lease, and application code can use LwIP directly through `rp2040_usb_portal_netif()` plus its own TCP or UDP code.
+
+For a static-only USB network interface, disable DHCP as well:
+
+```c
+rp2040_usb_portal_config_t config;
+rp2040_usb_portal_config_init(&config);
+
+config.enable_dhcp_server = false;
+config.enable_dns_catchall = false;
+config.enable_http_server = false;
+
+rp2040_usb_portal_init(&config);
+```
+
+Do not disable DHCP for the plug-and-go portal flow. Without DHCP, the host needs some other way to know the subnet and its own address. If a product already controls host network configuration, the option is there.
+
+## Migrating From A Wireless AP Portal
+
+This project is meant to replace the network side of a classic embedded WiFi AP portal without forcing the application to become USB-specific.
+
+1. Remove the WiFi AP bring-up code: SSID, password, channel, country, AP mode, and wireless station tracking.
+2. Add this library's headers, source file, TinyUSB descriptor support, LwIP options, and PlatformIO `extra_scripts` support to the project.
+3. Replace the AP IP/subnet setup with `rp2040_usb_portal_config_t`. Keep `192.168.4.1` if it already fits, or set a different address once in the config.
+4. Move existing HTTP routes into an `rp2040_usb_portal_http_handler_t` callback. Return `false` for paths the library should handle or redirect.
+5. Keep DHCP enabled unless the host-side software is prepared to configure its own address.
+6. If the project only needs a link for UDP, TCP, telemetry, RPC, or a custom protocol, disable DNS and HTTP and use the LwIP netif directly.
+7. Keep hardware access explicit. The example registers safe pins by mode and rejects arbitrary GPIO requests; product code should do the same for relays, motors, analog inputs, and configuration pins.
+8. Call `rp2040_usb_portal_task()` regularly from the main loop.
 
 ## HTTP API
 
@@ -184,16 +253,16 @@ Representative PlatformIO build sizes:
 
 | Environment | Flash bytes | RAM bytes |
 | --- | ---: | ---: |
-| `pico-portal-auto` | 68,424 | 70,308 |
-| `pico-portal-android` | 67,880 | 70,300 |
-| `pico-portal-windows` | 68,200 | 73,060 |
-| `pico-portal-windows-rndis` | 67,972 | 70,300 |
-| `kb2040-portal-auto` | 67,572 | 70,296 |
-| `kb2040-portal-android` | 67,028 | 70,288 |
-| `kb2040-portal-windows` | 67,348 | 73,048 |
-| `kb2040-portal-windows-rndis` | 67,120 | 70,288 |
+| `pico-portal-auto` | 69,576 | 70,308 |
+| `pico-portal-android` | 69,032 | 70,300 |
+| `pico-portal-windows` | 69,352 | 73,060 |
+| `pico-portal-windows-rndis` | 69,116 | 70,300 |
+| `kb2040-portal-auto` | 68,724 | 70,296 |
+| `kb2040-portal-android` | 68,180 | 70,288 |
+| `kb2040-portal-windows` | 68,500 | 73,048 |
+| `kb2040-portal-windows-rndis` | 68,264 | 70,288 |
 
-The adaptive firmware is about 544 bytes larger than the Android-only CDC-ECM profile in these builds. It is about 452 bytes larger than the Windows RNDIS profile on Pico. The CDC-NCM profile uses about 2.7 KiB more RAM than the ECM/RNDIS profiles.
+The adaptive firmware is about 544 bytes larger than the Android-only CDC-ECM profile in these builds. It is about 460 bytes larger than the Windows RNDIS profile on Pico. The CDC-NCM profile uses about 2.7 KiB more RAM than the ECM/RNDIS profiles.
 
 ## Implementation Notes
 

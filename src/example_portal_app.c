@@ -7,6 +7,12 @@
 #include "pico/stdlib.h"
 #include "rp2040_usb_ethernet_portal.h"
 
+/*
+ * Demo LED selection:
+ * - platformio.ini chooses the board.
+ * - The Pico SDK board header supplies PICO_DEFAULT_LED_PIN when it knows one.
+ * - A project can override both values with build flags if needed.
+ */
 #ifndef PICO_DEFAULT_LED_PIN_INVERTED
 #define PICO_DEFAULT_LED_PIN_INVERTED 0
 #endif
@@ -39,47 +45,169 @@ typedef struct {
     const char *name;
 } example_pin_t;
 
+/*
+ * Hardware exposure list for this example.
+ *
+ * The HTTP API only reads or writes pins in this table. Extend this table
+ * deliberately with a mode and polarity instead of accepting arbitrary GPIO
+ * numbers from the browser.
+ */
 #if EXAMPLE_HAS_LED_GPIO
 static example_pin_t example_pins[] = {
-    {.gpio = EXAMPLE_LED_GPIO, .mode = EXAMPLE_PIN_OUTPUT, .inverted = EXAMPLE_LED_INVERTED, .name = "board_led"},
+    {
+        .gpio = EXAMPLE_LED_GPIO,
+        .mode = EXAMPLE_PIN_OUTPUT,
+        .inverted = EXAMPLE_LED_INVERTED,
+        .name = "board_led",
+    },
 };
 #else
 static example_pin_t example_pins[1];
 #endif
 
 static const size_t example_pin_count = EXAMPLE_HAS_LED_GPIO ? 1u : 0u;
-static char api_body[1024];
+static char json_response_buffer[1024];
 
-static const char index_html[] =
-"<!doctype html><html><head><meta charset=\"utf-8\">"
-"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-"<title>RP2040 Control</title><style>"
-":root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#17202a;background:#f6f7f9}"
-"body{margin:0}.wrap{max-width:860px;margin:0 auto;padding:28px 18px}"
-"header{display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid #d9dee5;padding-bottom:18px}"
-"h1{font-size:28px;margin:0}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:18px}"
-".panel{background:#fff;border:1px solid #d9dee5;border-radius:8px;padding:18px;box-shadow:0 1px 3px #0001}"
-".label{color:#667085;font-size:13px;margin-bottom:5px}.value{font-size:28px;font-weight:650}"
-"button{appearance:none;border:0;border-radius:6px;background:#0f766e;color:white;font-size:16px;font-weight:650;padding:12px 16px;cursor:pointer}"
-"button.off{background:#374151}button:disabled{background:#9ca3af;cursor:not-allowed}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}"
-"</style></head><body><div class=\"wrap\"><header><div><h1>RP2040 Control</h1>"
-"<div class=\"label mono\" id=\"ip\">192.168.4.1</div></div><button id=\"toggle\" disabled>Loading</button></header><main>"
-"<section class=\"panel\"><div class=\"label\">Configured output</div><div id=\"gpio\" class=\"value\">-</div></section>"
-"<section class=\"panel\"><div class=\"label\">Output state</div><div id=\"state\" class=\"value\">-</div></section>"
-"<section class=\"panel\"><div class=\"label\">Uptime</div><div id=\"uptime\" class=\"value\">-</div></section>"
-"<section class=\"panel\"><div class=\"label\">HTTP requests</div><div id=\"requests\" class=\"value\">-</div></section>"
-"<section class=\"panel\"><div class=\"label\">Device MAC</div><div id=\"mac\" class=\"value mono\">-</div></section>"
-"</main></div><script>"
-"const $=id=>document.getElementById(id);let outputPin=null;"
-"async function state(){const r=await fetch('/api/state',{cache:'no-store'});return r.json()}"
-"function draw(s){$('ip').textContent=s.portal.ip;const outputs=s.pins.filter(p=>p.mode==='out');outputPin=outputs[0]||null;"
-"$('gpio').textContent=outputPin?outputPin.name+' GPIO '+outputPin.gpio:'none';$('state').textContent=outputPin?(outputPin.value?'HIGH':'LOW'):'-';"
-"$('uptime').textContent=Math.floor(s.uptimeMs/1000)+' s';$('requests').textContent=s.portal.requests;$('mac').textContent=s.portal.mac;"
-"const b=$('toggle');b.disabled=!outputPin;b.textContent=outputPin?(outputPin.value?'Set low':'Set high'):'No output';b.className=outputPin&&outputPin.value?'off':''}"
-"async function refresh(){try{draw(await state())}catch(e){}}"
-"$('toggle').onclick=async()=>{if(!outputPin)return;await fetch('/api/gpio?pin='+outputPin.gpio+'&value='+(outputPin.value?0:1),{cache:'no-store'});refresh()};"
-"refresh();setInterval(refresh,1000);"
-"</script></body></html>";
+/*
+ * A self-contained page keeps the demo easy to flash and inspect. Production
+ * projects can serve different routes from the same HTTP callback.
+ */
+static const char portal_page_html[] =
+    "<!doctype html>\n"
+    "<html lang='en'>\n"
+    "<head>\n"
+    "  <meta charset='utf-8'>\n"
+    "  <meta name='viewport' content='width=device-width,initial-scale=1'>\n"
+    "  <title>RP2040 Control</title>\n"
+    "  <style>\n"
+    "    :root {\n"
+    "      font-family: system-ui, -apple-system, Segoe UI, sans-serif;\n"
+    "      color: #17202a;\n"
+    "      background: #f6f7f9;\n"
+    "    }\n"
+    "    body { margin: 0; }\n"
+    "    .wrap { max-width: 860px; margin: 0 auto; padding: 28px 18px; }\n"
+    "    header {\n"
+    "      display: flex;\n"
+    "      align-items: end;\n"
+    "      justify-content: space-between;\n"
+    "      gap: 16px;\n"
+    "      border-bottom: 1px solid #d9dee5;\n"
+    "      padding-bottom: 18px;\n"
+    "    }\n"
+    "    h1 { font-size: 28px; margin: 0; }\n"
+    "    main {\n"
+    "      display: grid;\n"
+    "      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n"
+    "      gap: 14px;\n"
+    "      margin-top: 18px;\n"
+    "    }\n"
+    "    .panel {\n"
+    "      background: #fff;\n"
+    "      border: 1px solid #d9dee5;\n"
+    "      border-radius: 8px;\n"
+    "      padding: 18px;\n"
+    "      box-shadow: 0 1px 3px #0001;\n"
+    "    }\n"
+    "    .label { color: #667085; font-size: 13px; margin-bottom: 5px; }\n"
+    "    .value { font-size: 28px; font-weight: 650; }\n"
+    "    button {\n"
+    "      appearance: none;\n"
+    "      border: 0;\n"
+    "      border-radius: 6px;\n"
+    "      background: #0f766e;\n"
+    "      color: white;\n"
+    "      cursor: pointer;\n"
+    "      font-size: 16px;\n"
+    "      font-weight: 650;\n"
+    "      padding: 12px 16px;\n"
+    "    }\n"
+    "    button.off { background: #374151; }\n"
+    "    button:disabled { background: #9ca3af; cursor: not-allowed; }\n"
+    "    .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }\n"
+    "  </style>\n"
+    "</head>\n"
+    "<body>\n"
+    "  <div class='wrap'>\n"
+    "    <header>\n"
+    "      <div>\n"
+    "        <h1>RP2040 Control</h1>\n"
+    "        <div class='label mono' id='ip'>192.168.4.1</div>\n"
+    "      </div>\n"
+    "      <button id='toggle' disabled>Loading</button>\n"
+    "    </header>\n"
+    "    <main>\n"
+    "      <section class='panel'>\n"
+    "        <div class='label'>Configured output</div>\n"
+    "        <div id='gpio' class='value'>-</div>\n"
+    "      </section>\n"
+    "      <section class='panel'>\n"
+    "        <div class='label'>Output state</div>\n"
+    "        <div id='state' class='value'>-</div>\n"
+    "      </section>\n"
+    "      <section class='panel'>\n"
+    "        <div class='label'>Uptime</div>\n"
+    "        <div id='uptime' class='value'>-</div>\n"
+    "      </section>\n"
+    "      <section class='panel'>\n"
+    "        <div class='label'>HTTP requests</div>\n"
+    "        <div id='requests' class='value'>-</div>\n"
+    "      </section>\n"
+    "      <section class='panel'>\n"
+    "        <div class='label'>Device MAC</div>\n"
+    "        <div id='mac' class='value mono'>-</div>\n"
+    "      </section>\n"
+    "    </main>\n"
+    "  </div>\n"
+    "  <script>\n"
+    "    const byId = (id) => document.getElementById(id);\n"
+    "    let outputPin = null;\n"
+    "\n"
+    "    async function fetchState() {\n"
+    "      const response = await fetch('/api/state', { cache: 'no-store' });\n"
+    "      return response.json();\n"
+    "    }\n"
+    "\n"
+    "    function renderState(state) {\n"
+    "      byId('ip').textContent = state.portal.ip;\n"
+    "\n"
+    "      const outputs = state.pins.filter((pin) => pin.mode === 'out');\n"
+    "      outputPin = outputs[0] || null;\n"
+    "\n"
+    "      byId('gpio').textContent = outputPin ? `${outputPin.name} GPIO ${outputPin.gpio}` : 'none';\n"
+    "      byId('state').textContent = outputPin ? (outputPin.value ? 'HIGH' : 'LOW') : '-';\n"
+    "      byId('uptime').textContent = `${Math.floor(state.uptimeMs / 1000)} s`;\n"
+    "      byId('requests').textContent = state.portal.requests;\n"
+    "      byId('mac').textContent = state.portal.mac;\n"
+    "\n"
+    "      const button = byId('toggle');\n"
+    "      button.disabled = !outputPin;\n"
+    "      button.textContent = outputPin ? (outputPin.value ? 'Set low' : 'Set high') : 'No output';\n"
+    "      button.className = outputPin && outputPin.value ? 'off' : '';\n"
+    "    }\n"
+    "\n"
+    "    async function refresh() {\n"
+    "      try {\n"
+    "        renderState(await fetchState());\n"
+    "      } catch (error) {\n"
+    "      }\n"
+    "    }\n"
+    "\n"
+    "    byId('toggle').onclick = async () => {\n"
+    "      if (!outputPin) {\n"
+    "        return;\n"
+    "      }\n"
+    "\n"
+    "      const nextValue = outputPin.value ? 0 : 1;\n"
+    "      await fetch(`/api/gpio?pin=${outputPin.gpio}&value=${nextValue}`, { cache: 'no-store' });\n"
+    "      refresh();\n"
+    "    };\n"
+    "\n"
+    "    refresh();\n"
+    "    setInterval(refresh, 1000);\n"
+    "  </script>\n"
+    "</body>\n"
+    "</html>\n";
 
 static const char *pin_mode_name(example_pin_mode_t mode) {
     switch (mode) {
@@ -94,19 +222,22 @@ static const char *pin_mode_name(example_pin_mode_t mode) {
     }
 }
 
-static void example_pin_write(const example_pin_t *pin, bool value) {
+static void write_registered_pin(const example_pin_t *pin, bool logical_value) {
     if (!pin || pin->mode != EXAMPLE_PIN_OUTPUT) {
         return;
     }
-    gpio_put(pin->gpio, pin->inverted ? !value : value);
+
+    bool electrical_value = pin->inverted ? !logical_value : logical_value;
+    gpio_put(pin->gpio, electrical_value);
 }
 
-static uint16_t example_pin_read(const example_pin_t *pin) {
+static uint16_t read_registered_pin(const example_pin_t *pin) {
     if (!pin) {
         return 0;
     }
 
     if (pin->mode == EXAMPLE_PIN_ANALOG) {
+        /* RP2040 ADC inputs are GPIO26 through GPIO29. */
         if (pin->gpio < 26 || pin->gpio > 29) {
             return 0;
         }
@@ -121,10 +252,12 @@ static uint16_t example_pin_read(const example_pin_t *pin) {
     return value ? 1u : 0u;
 }
 
-static void init_example_pins(void) {
+static void init_registered_pins(void) {
     bool adc_needed = false;
+
     for (size_t i = 0; i < example_pin_count; i++) {
         example_pin_t *pin = &example_pins[i];
+
         if (pin->mode == EXAMPLE_PIN_ANALOG) {
             if (pin->gpio >= 26 && pin->gpio <= 29) {
                 adc_needed = true;
@@ -135,8 +268,9 @@ static void init_example_pins(void) {
 
         gpio_init(pin->gpio);
         gpio_set_dir(pin->gpio, pin->mode == EXAMPLE_PIN_OUTPUT);
+
         if (pin->mode == EXAMPLE_PIN_OUTPUT) {
-            example_pin_write(pin, false);
+            write_registered_pin(pin, false);
         }
     }
 
@@ -145,7 +279,7 @@ static void init_example_pins(void) {
     }
 }
 
-static example_pin_t *find_pin(uint gpio) {
+static example_pin_t *find_registered_pin(uint gpio) {
     for (size_t i = 0; i < example_pin_count; i++) {
         if (example_pins[i].gpio == gpio) {
             return &example_pins[i];
@@ -154,7 +288,7 @@ static example_pin_t *find_pin(uint gpio) {
     return NULL;
 }
 
-static example_pin_t *first_output_pin(void) {
+static example_pin_t *first_registered_output_pin(void) {
     for (size_t i = 0; i < example_pin_count; i++) {
         if (example_pins[i].mode == EXAMPLE_PIN_OUTPUT) {
             return &example_pins[i];
@@ -163,7 +297,7 @@ static example_pin_t *first_output_pin(void) {
     return NULL;
 }
 
-static bool query_uint(const char *query, const char *key, uint *value) {
+static bool query_param_uint(const char *query, const char *key, uint *value) {
     size_t key_len = strlen(key);
     const char *cursor = query ? query : "";
 
@@ -203,17 +337,24 @@ static bool set_json_response(rp2040_usb_portal_http_response_t *response,
     return true;
 }
 
-static bool send_error(rp2040_usb_portal_http_response_t *response, const char *status, const char *message) {
-    snprintf(api_body, sizeof(api_body), "{\"error\":\"%s\"}\n", message);
-    return set_json_response(response, status, api_body);
+static bool send_error_response(rp2040_usb_portal_http_response_t *response,
+                                const char *status,
+                                const char *message) {
+    snprintf(json_response_buffer, sizeof(json_response_buffer), "{\"error\":\"%s\"}\n", message);
+    return set_json_response(response, status, json_response_buffer);
 }
 
 static void append_pin_json(char *body, size_t body_len, size_t *used, const example_pin_t *pin) {
-    uint16_t value = example_pin_read(pin);
+    uint16_t value = read_registered_pin(pin);
+    const char *separator = (*used > 0 && body[*used - 1] != '[') ? "," : "";
+
     int count = snprintf(body + *used, body_len - *used,
                          "%s{\"gpio\":%u,\"name\":\"%s\",\"mode\":\"%s\",\"value\":%u}",
-                         *used && body[*used - 1] != '[' ? "," : "",
-                         pin->gpio, pin->name, pin_mode_name(pin->mode), value);
+                         separator,
+                         pin->gpio,
+                         pin->name,
+                         pin_mode_name(pin->mode),
+                         value);
     if (count > 0) {
         size_t written = (size_t)count;
         if (written >= body_len - *used) {
@@ -224,7 +365,7 @@ static void append_pin_json(char *body, size_t body_len, size_t *used, const exa
     }
 }
 
-static bool send_state(rp2040_usb_portal_http_response_t *response) {
+static bool send_state_response(rp2040_usb_portal_http_response_t *response) {
     rp2040_usb_portal_config_t config;
     char ip[16];
     const uint8_t *mac = rp2040_usb_portal_mac_address();
@@ -233,7 +374,7 @@ static bool send_state(rp2040_usb_portal_http_response_t *response) {
     rp2040_usb_portal_ipv4_to_string(config.address, ip, sizeof(ip));
 
     size_t used = 0;
-    int count = snprintf(api_body, sizeof(api_body),
+    int count = snprintf(json_response_buffer, sizeof(json_response_buffer),
                          "{\"portal\":{\"ip\":\"%s\",\"requests\":%lu,"
                          "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\"},"
                          "\"uptimeMs\":%lu,\"pins\":[",
@@ -242,70 +383,70 @@ static bool send_state(rp2040_usb_portal_http_response_t *response) {
                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                          (unsigned long)to_ms_since_boot(get_absolute_time()));
     if (count > 0) {
-        used = (size_t)count < sizeof(api_body) ? (size_t)count : sizeof(api_body) - 1;
+        used = (size_t)count < sizeof(json_response_buffer) ? (size_t)count : sizeof(json_response_buffer) - 1;
     }
 
-    for (size_t i = 0; i < example_pin_count && used < sizeof(api_body) - 4; i++) {
-        append_pin_json(api_body, sizeof(api_body), &used, &example_pins[i]);
+    for (size_t i = 0; i < example_pin_count && used < sizeof(json_response_buffer) - 4; i++) {
+        append_pin_json(json_response_buffer, sizeof(json_response_buffer), &used, &example_pins[i]);
     }
-    snprintf(api_body + used, sizeof(api_body) - used, "]}\n");
+    snprintf(json_response_buffer + used, sizeof(json_response_buffer) - used, "]}\n");
 
-    return set_json_response(response, "200 OK", api_body);
+    return set_json_response(response, "200 OK", json_response_buffer);
 }
 
-static bool handle_gpio_request(const rp2040_usb_portal_http_request_t *request,
-                                rp2040_usb_portal_http_response_t *response) {
+static bool handle_gpio_api_request(const rp2040_usb_portal_http_request_t *request,
+                                    rp2040_usb_portal_http_response_t *response) {
     uint pin_number = 0;
     uint value = 0;
-    bool has_pin = query_uint(request->query, "pin", &pin_number);
-    bool has_value = query_uint(request->query, "value", &value);
-    example_pin_t *pin = has_pin ? find_pin(pin_number) : first_output_pin();
+    bool has_pin = query_param_uint(request->query, "pin", &pin_number);
+    bool has_value = query_param_uint(request->query, "value", &value);
+    example_pin_t *pin = has_pin ? find_registered_pin(pin_number) : first_registered_output_pin();
 
     if (!pin) {
-        return send_error(response, "404 Not Found", "pin is not registered");
+        return send_error_response(response, "404 Not Found", "pin is not registered");
     }
 
     if (has_value) {
         if (pin->mode != EXAMPLE_PIN_OUTPUT) {
-            return send_error(response, "403 Forbidden", "pin is not configured as an output");
+            return send_error_response(response, "403 Forbidden", "pin is not configured as an output");
         }
         if (value > 1) {
-            return send_error(response, "400 Bad Request", "output value must be 0 or 1");
+            return send_error_response(response, "400 Bad Request", "output value must be 0 or 1");
         }
-        example_pin_write(pin, value != 0);
+        write_registered_pin(pin, value != 0);
     }
 
-    uint16_t read_value = example_pin_read(pin);
-    snprintf(api_body, sizeof(api_body),
+    uint16_t read_value = read_registered_pin(pin);
+    snprintf(json_response_buffer, sizeof(json_response_buffer),
              "{\"gpio\":%u,\"name\":\"%s\",\"mode\":\"%s\",\"value\":%u}\n",
              pin->gpio, pin->name, pin_mode_name(pin->mode), read_value);
-    return set_json_response(response, "200 OK", api_body);
+    return set_json_response(response, "200 OK", json_response_buffer);
 }
 
-static bool example_http_handler(const rp2040_usb_portal_http_request_t *request,
-                                 rp2040_usb_portal_http_response_t *response,
-                                 void *user_data) {
+static bool handle_example_http_request(const rp2040_usb_portal_http_request_t *request,
+                                        rp2040_usb_portal_http_response_t *response,
+                                        void *user_data) {
     (void)user_data;
 
     if (strcmp(request->method, "GET") != 0) {
-        return send_error(response, "405 Method Not Allowed", "method not allowed");
+        return send_error_response(response, "405 Method Not Allowed", "method not allowed");
     }
 
     if (strcmp(request->path, "/") == 0 ||
         strcmp(request->path, "/index.html") == 0) {
         response->status = "200 OK";
         response->content_type = "text/html; charset=utf-8";
-        response->body = index_html;
+        response->body = portal_page_html;
         return true;
     }
 
     if (strcmp(request->path, "/api/state") == 0 ||
         strcmp(request->path, "/api/pins") == 0) {
-        return send_state(response);
+        return send_state_response(response);
     }
 
     if (strcmp(request->path, "/api/gpio") == 0) {
-        return handle_gpio_request(request, response);
+        return handle_gpio_api_request(request, response);
     }
 
     return false;
@@ -313,11 +454,11 @@ static bool example_http_handler(const rp2040_usb_portal_http_request_t *request
 
 int main(void) {
     stdio_init_all();
-    init_example_pins();
+    init_registered_pins();
 
     rp2040_usb_portal_config_t config;
     rp2040_usb_portal_config_init(&config);
-    config.http_handler = example_http_handler;
+    config.http_handler = handle_example_http_request;
 
     if (!rp2040_usb_portal_init(&config)) {
         while (true) {

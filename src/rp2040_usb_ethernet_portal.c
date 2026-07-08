@@ -108,6 +108,7 @@ void rp2040_usb_portal_config_init(rp2040_usb_portal_config_t *config) {
     config->default_redirect_url = NULL;
 #endif
     config->advertise_gateway = RP2040_USB_PORTAL_ADVERTISE_GATEWAY != 0;
+    config->enable_dhcp_server = RP2040_USB_PORTAL_ENABLE_DHCP != 0;
     config->enable_dns_catchall = true;
     config->enable_http_server = true;
     config->initialize_lwip = true;
@@ -556,28 +557,30 @@ bool rp2040_usb_portal_init(const rp2040_usb_portal_config_t *config) {
     active_gateway = ip4_from_portal(active_config.gateway);
     init_netif();
 
-    memset(dhcp_entries, 0, sizeof(dhcp_entries));
-    uint8_t lease_count = active_config.dhcp_lease_count;
-    if (lease_count > RP2040_USB_PORTAL_DHCP_LEASE_COUNT) {
-        lease_count = RP2040_USB_PORTAL_DHCP_LEASE_COUNT;
-    }
-    for (uint8_t i = 0; i < lease_count; i++) {
-        dhcp_entries[i].addr = ip4_from_portal(ipv4_add_host(active_config.dhcp_lease_start, i));
-        dhcp_entries[i].lease = active_config.dhcp_lease_seconds;
-    }
+    if (active_config.enable_dhcp_server) {
+        memset(dhcp_entries, 0, sizeof(dhcp_entries));
+        uint8_t lease_count = active_config.dhcp_lease_count;
+        if (lease_count > RP2040_USB_PORTAL_DHCP_LEASE_COUNT) {
+            lease_count = RP2040_USB_PORTAL_DHCP_LEASE_COUNT;
+        }
+        for (uint8_t i = 0; i < lease_count; i++) {
+            dhcp_entries[i].addr = ip4_from_portal(ipv4_add_host(active_config.dhcp_lease_start, i));
+            dhcp_entries[i].lease = active_config.dhcp_lease_seconds;
+        }
 
-    ip4_addr_t router = active_config.advertise_gateway ?
-                        ip4_from_portal(active_config.dhcp_router) :
-                        ip4_from_portal(RP2040_USB_PORTAL_IPV4(0, 0, 0, 0));
-    dhcp_config.router = router;
-    dhcp_config.port = active_config.dhcp_port;
-    dhcp_config.dns = ip4_from_portal(active_config.dns_server);
-    dhcp_config.domain = active_config.dhcp_domain;
-    dhcp_config.num_entry = lease_count;
-    dhcp_config.entries = dhcp_entries;
+        ip4_addr_t router = active_config.advertise_gateway ?
+                            ip4_from_portal(active_config.dhcp_router) :
+                            ip4_from_portal(RP2040_USB_PORTAL_IPV4(0, 0, 0, 0));
+        dhcp_config.router = router;
+        dhcp_config.port = active_config.dhcp_port;
+        dhcp_config.dns = ip4_from_portal(active_config.dns_server);
+        dhcp_config.domain = active_config.dhcp_domain;
+        dhcp_config.num_entry = lease_count;
+        dhcp_config.entries = dhcp_entries;
 
-    if (dhserv_init(&dhcp_config) != ERR_OK) {
-        return false;
+        if (dhserv_init(&dhcp_config) != ERR_OK) {
+            return false;
+        }
     }
     if (active_config.enable_dns_catchall &&
         dnserv_init(IP_ADDR_ANY, active_config.dns_port, dns_query_proc) != ERR_OK) {

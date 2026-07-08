@@ -54,6 +54,7 @@ typedef struct {
     const char *dhcp_domain;
     const char *default_redirect_url;
     bool advertise_gateway;
+    bool enable_dhcp_server;
     bool enable_dns_catchall;
     bool enable_http_server;
     bool initialize_lwip;
