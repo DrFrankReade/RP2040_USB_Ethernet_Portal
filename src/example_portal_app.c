@@ -67,6 +67,9 @@ static example_pin_t example_pins[1];
 
 static const size_t example_pin_count = EXAMPLE_HAS_LED_GPIO ? 1u : 0u;
 static char json_response_buffer[1024];
+static char serial_command_buffer[64];
+static size_t serial_command_len;
+static bool serial_console_was_connected;
 
 /*
  * A self-contained page keeps the demo easy to flash and inspect. Production
@@ -394,6 +397,160 @@ static bool send_state_response(rp2040_usb_portal_http_response_t *response) {
     return set_json_response(response, "200 OK", json_response_buffer);
 }
 
+static void serial_write_text(const char *text) {
+    if (text) {
+        rp2040_usb_portal_serial_write(text, strlen(text));
+    }
+}
+
+static void serial_prompt(void) {
+    serial_write_text("> ");
+}
+
+static void serial_print_help(void) {
+    serial_write_text(
+        "Commands:\r\n"
+        "  help       show this list\r\n"
+        "  state      show portal and pin state\r\n"
+        "  led on     set the registered output high\r\n"
+        "  led off    set the registered output low\r\n"
+        "  bootloader reboot to BOOTSEL\r\n");
+}
+
+static void serial_print_state(void) {
+    rp2040_usb_portal_config_t config;
+    char ip[16];
+    char line[192];
+    const uint8_t *mac = rp2040_usb_portal_mac_address();
+
+    rp2040_usb_portal_config_init(&config);
+    rp2040_usb_portal_ipv4_to_string(config.address, ip, sizeof(ip));
+
+    snprintf(line, sizeof(line),
+             "Portal: http://%s/  requests=%lu  uptime=%lu ms\r\n"
+             "MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+             ip,
+             (unsigned long)rp2040_usb_portal_http_request_count(),
+             (unsigned long)to_ms_since_boot(get_absolute_time()),
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    serial_write_text(line);
+
+    for (size_t i = 0; i < example_pin_count; i++) {
+        const example_pin_t *pin = &example_pins[i];
+        snprintf(line, sizeof(line), "%s: GPIO %u %s value=%u\r\n",
+                 pin->name,
+                 pin->gpio,
+                 pin_mode_name(pin->mode),
+                 read_registered_pin(pin));
+        serial_write_text(line);
+    }
+
+    if (example_pin_count == 0) {
+        serial_write_text("No registered example pins.\r\n");
+    }
+}
+
+static char *trim_serial_command(char *command) {
+    while (*command == ' ' || *command == '\t') {
+        command++;
+    }
+
+    char *end = command + strlen(command);
+    while (end > command && (end[-1] == ' ' || end[-1] == '\t')) {
+        *--end = '\0';
+    }
+
+    return command;
+}
+
+static void serial_set_first_output(bool value) {
+    example_pin_t *pin = first_registered_output_pin();
+    if (!pin) {
+        serial_write_text("No registered output pin.\r\n");
+        return;
+    }
+
+    write_registered_pin(pin, value);
+
+    char line[96];
+    snprintf(line, sizeof(line), "%s GPIO %u = %s\r\n",
+             pin->name,
+             pin->gpio,
+             value ? "HIGH" : "LOW");
+    serial_write_text(line);
+}
+
+static void handle_serial_command(char *raw_command) {
+    char *command = trim_serial_command(raw_command);
+
+    if (strcmp(command, "help") == 0) {
+        serial_print_help();
+    } else if (strcmp(command, "state") == 0) {
+        serial_print_state();
+    } else if (strcmp(command, "led on") == 0) {
+        serial_set_first_output(true);
+    } else if (strcmp(command, "led off") == 0) {
+        serial_set_first_output(false);
+    } else if (strcmp(command, "bootloader") == 0) {
+        serial_write_text("Rebooting to BOOTSEL.\r\n");
+        rp2040_usb_portal_reboot_to_bootsel(250);
+    } else {
+        serial_write_text("Unknown command. Type help.\r\n");
+    }
+}
+
+static void handle_example_serial_rx(const uint8_t *data, size_t len, void *user_data) {
+    (void)user_data;
+
+    for (size_t i = 0; i < len; i++) {
+        char ch = (char)data[i];
+
+        if (ch == '\r' || ch == '\n') {
+            if (serial_command_len > 0) {
+                serial_command_buffer[serial_command_len] = '\0';
+                handle_serial_command(serial_command_buffer);
+                serial_command_len = 0;
+                serial_prompt();
+            }
+            continue;
+        }
+
+        if (ch == '\b' || ch == 0x7f) {
+            if (serial_command_len > 0) {
+                serial_command_len--;
+            }
+            continue;
+        }
+
+        if (ch < 32 || ch > 126) {
+            continue;
+        }
+
+        if (serial_command_len + 1 < sizeof(serial_command_buffer)) {
+            serial_command_buffer[serial_command_len++] = ch;
+        } else {
+            serial_command_len = 0;
+            serial_write_text("Command too long.\r\n");
+            serial_prompt();
+        }
+    }
+}
+
+static void service_serial_console_banner(void) {
+    bool connected = rp2040_usb_portal_serial_connected();
+
+    if (connected && !serial_console_was_connected) {
+        serial_command_len = 0;
+        serial_write_text("\r\nRP2040 USB Portal serial console\r\n");
+        serial_print_help();
+        serial_prompt();
+    } else if (!connected) {
+        serial_command_len = 0;
+    }
+
+    serial_console_was_connected = connected;
+}
+
 static bool handle_gpio_api_request(const rp2040_usb_portal_http_request_t *request,
                                     rp2040_usb_portal_http_response_t *response) {
     uint pin_number = 0;
@@ -459,6 +616,7 @@ int main(void) {
     rp2040_usb_portal_config_t config;
     rp2040_usb_portal_config_init(&config);
     config.http_handler = handle_example_http_request;
+    config.serial_rx_handler = handle_example_serial_rx;
 
     if (!rp2040_usb_portal_init(&config)) {
         while (true) {
@@ -468,5 +626,6 @@ int main(void) {
 
     while (true) {
         rp2040_usb_portal_task();
+        service_serial_console_banner();
     }
 }

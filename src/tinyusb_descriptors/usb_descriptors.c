@@ -27,7 +27,20 @@
 #include "tusb.h"
 
 /* Keep network modes on separate PIDs so Windows does not reuse cached driver binding. */
-#if USB_NET_CROSS_PLATFORM
+#if CFG_TUD_CDC && USB_NET_CROSS_PLATFORM
+#define USB_PID 0x40B6
+#define USB_PID_ADAPTIVE_WINDOWS 0x40B7
+#elif CFG_TUD_CDC && USB_NET_MODE_ECM_ONLY
+#define USB_PID 0x40B4
+#elif CFG_TUD_CDC && USB_NET_MODE_ECM_FIRST
+#define USB_PID 0x40B3
+#elif CFG_TUD_CDC && CFG_TUD_ECM_RNDIS
+#define USB_PID 0x40B1
+#elif CFG_TUD_CDC && CFG_TUD_NCM
+#define USB_PID 0x40B2
+#elif CFG_TUD_CDC
+#define USB_PID 0x40B0
+#elif USB_NET_CROSS_PLATFORM
 #define USB_PID 0x40A6
 #define USB_PID_ADAPTIVE_WINDOWS 0x40A7
 #elif USB_NET_MODE_ECM_ONLY
@@ -84,14 +97,19 @@ enum
   STRID_MANUFACTURER,
   STRID_PRODUCT,
   STRID_SERIAL,
-  STRID_INTERFACE,
+  STRID_NET_INTERFACE,
+  STRID_SERIAL_INTERFACE,
   STRID_MAC
 };
 
 enum
 {
-  ITF_NUM_CDC = 0,
-  ITF_NUM_CDC_DATA,
+  ITF_NUM_NET = 0,
+  ITF_NUM_NET_DATA,
+#if CFG_TUD_CDC
+  ITF_NUM_SERIAL,
+  ITF_NUM_SERIAL_DATA,
+#endif
   ITF_NUM_TOTAL
 };
 
@@ -162,9 +180,10 @@ uint8_t const * tud_descriptor_device_cb(void)
 //--------------------------------------------------------------------+
 // Configuration Descriptor
 //--------------------------------------------------------------------+
-#define MAIN_CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_RNDIS_DESC_LEN)
-#define ALT_CONFIG_TOTAL_LEN     (TUD_CONFIG_DESC_LEN + TUD_CDC_ECM_DESC_LEN)
-#define NCM_CONFIG_TOTAL_LEN     (TUD_CONFIG_DESC_LEN + TUD_CDC_NCM_DESC_LEN)
+#define SERIAL_CONFIG_TOTAL_LEN  (CFG_TUD_CDC ? TUD_CDC_DESC_LEN : 0)
+#define MAIN_CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_RNDIS_DESC_LEN + SERIAL_CONFIG_TOTAL_LEN)
+#define ALT_CONFIG_TOTAL_LEN     (TUD_CONFIG_DESC_LEN + TUD_CDC_ECM_DESC_LEN + SERIAL_CONFIG_TOTAL_LEN)
+#define NCM_CONFIG_TOTAL_LEN     (TUD_CONFIG_DESC_LEN + TUD_CDC_NCM_DESC_LEN + SERIAL_CONFIG_TOTAL_LEN)
 
 #if CFG_TUSB_MCU == OPT_MCU_LPC175X_6X || CFG_TUSB_MCU == OPT_MCU_LPC177X_8X || CFG_TUSB_MCU == OPT_MCU_LPC40XX
   // LPC 17xx and 40xx endpoint type (bulk/interrupt/iso) are fixed by its number
@@ -193,6 +212,10 @@ uint8_t const * tud_descriptor_device_cb(void)
   #define EPNUM_NET_IN      0x82
 #endif
 
+#define EPNUM_SERIAL_NOTIF   0x83
+#define EPNUM_SERIAL_OUT     0x04
+#define EPNUM_SERIAL_IN      0x84
+
 #if CFG_TUD_ECM_RNDIS && !USB_NET_MODE_ECM_ONLY && !USB_NET_CROSS_PLATFORM
 
 static uint8_t const rndis_configuration[] =
@@ -201,7 +224,10 @@ static uint8_t const rndis_configuration[] =
   TUD_CONFIG_DESCRIPTOR(CONFIG_ID_RNDIS+1, ITF_NUM_TOTAL, 0, MAIN_CONFIG_TOTAL_LEN, 0, 100),
 
   // Interface number, string index, EP notification address and size, EP data address (out, in) and size.
-  TUD_RNDIS_DESCRIPTOR(ITF_NUM_CDC, STRID_INTERFACE, EPNUM_NET_NOTIF, 8, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE),
+  TUD_RNDIS_DESCRIPTOR(ITF_NUM_NET, STRID_NET_INTERFACE, EPNUM_NET_NOTIF, 8, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE),
+#if CFG_TUD_CDC
+  TUD_CDC_DESCRIPTOR(ITF_NUM_SERIAL, STRID_SERIAL_INTERFACE, EPNUM_SERIAL_NOTIF, 8, EPNUM_SERIAL_OUT, EPNUM_SERIAL_IN, CFG_TUD_CDC_EP_BUFSIZE),
+#endif
 };
 
 #endif
@@ -210,7 +236,10 @@ static uint8_t const rndis_configuration[] =
 static uint8_t const adaptive_rndis_configuration[] =
 {
   TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, MAIN_CONFIG_TOTAL_LEN, 0, 100),
-  TUD_RNDIS_DESCRIPTOR(ITF_NUM_CDC, STRID_INTERFACE, EPNUM_NET_NOTIF, 8, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE),
+  TUD_RNDIS_DESCRIPTOR(ITF_NUM_NET, STRID_NET_INTERFACE, EPNUM_NET_NOTIF, 8, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE),
+#if CFG_TUD_CDC
+  TUD_CDC_DESCRIPTOR(ITF_NUM_SERIAL, STRID_SERIAL_INTERFACE, EPNUM_SERIAL_NOTIF, 8, EPNUM_SERIAL_OUT, EPNUM_SERIAL_IN, CFG_TUD_CDC_EP_BUFSIZE),
+#endif
 };
 #endif
 
@@ -223,7 +252,10 @@ static uint8_t const ecm_configuration[] =
   TUD_CONFIG_DESCRIPTOR(CONFIG_ID_ECM+1, ITF_NUM_TOTAL, 0, ALT_CONFIG_TOTAL_LEN, 0, 100),
 
   // Interface number, description string index, MAC address string index, EP notification address and size, EP data address (out, in), and size, max segment size.
-  TUD_CDC_ECM_DESCRIPTOR(ITF_NUM_CDC, STRID_INTERFACE, STRID_MAC, EPNUM_NET_NOTIF, 64, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE, CFG_TUD_NET_MTU),
+  TUD_CDC_ECM_DESCRIPTOR(ITF_NUM_NET, STRID_NET_INTERFACE, STRID_MAC, EPNUM_NET_NOTIF, 64, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE, CFG_TUD_NET_MTU),
+#if CFG_TUD_CDC
+  TUD_CDC_DESCRIPTOR(ITF_NUM_SERIAL, STRID_SERIAL_INTERFACE, EPNUM_SERIAL_NOTIF, 8, EPNUM_SERIAL_OUT, EPNUM_SERIAL_IN, CFG_TUD_CDC_EP_BUFSIZE),
+#endif
 };
 #endif
 
@@ -231,7 +263,10 @@ static uint8_t const ecm_configuration[] =
 static uint8_t const adaptive_ecm_configuration[] =
 {
   TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, ALT_CONFIG_TOTAL_LEN, 0, 100),
-  TUD_CDC_ECM_DESCRIPTOR(ITF_NUM_CDC, STRID_INTERFACE, STRID_MAC, EPNUM_NET_NOTIF, 64, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE, CFG_TUD_NET_MTU),
+  TUD_CDC_ECM_DESCRIPTOR(ITF_NUM_NET, STRID_NET_INTERFACE, STRID_MAC, EPNUM_NET_NOTIF, 64, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE, CFG_TUD_NET_MTU),
+#if CFG_TUD_CDC
+  TUD_CDC_DESCRIPTOR(ITF_NUM_SERIAL, STRID_SERIAL_INTERFACE, EPNUM_SERIAL_NOTIF, 8, EPNUM_SERIAL_OUT, EPNUM_SERIAL_IN, CFG_TUD_CDC_EP_BUFSIZE),
+#endif
 };
 #endif
 
@@ -243,7 +278,10 @@ static uint8_t const ncm_configuration[] =
   TUD_CONFIG_DESCRIPTOR(CONFIG_ID_NCM+1, ITF_NUM_TOTAL, 0, NCM_CONFIG_TOTAL_LEN, 0, 100),
 
   // Interface number, description string index, MAC address string index, EP notification address and size, EP data address (out, in), and size, max segment size.
-  TUD_CDC_NCM_DESCRIPTOR(ITF_NUM_CDC, STRID_INTERFACE, STRID_MAC, EPNUM_NET_NOTIF, 64, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE, CFG_TUD_NET_MTU),
+  TUD_CDC_NCM_DESCRIPTOR(ITF_NUM_NET, STRID_NET_INTERFACE, STRID_MAC, EPNUM_NET_NOTIF, 64, EPNUM_NET_OUT, EPNUM_NET_IN, CFG_TUD_NET_ENDPOINT_SIZE, CFG_TUD_NET_MTU),
+#if CFG_TUD_CDC
+  TUD_CDC_DESCRIPTOR(ITF_NUM_SERIAL, STRID_SERIAL_INTERFACE, EPNUM_SERIAL_NOTIF, 8, EPNUM_SERIAL_OUT, EPNUM_SERIAL_IN, CFG_TUD_CDC_EP_BUFSIZE),
+#endif
 };
 
 #endif
@@ -353,7 +391,7 @@ uint8_t const desc_ms_os_20[] =
   U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_CONFIGURATION), 0, 0, U16_TO_U8S_LE(MS_OS_20_DESC_LEN-0x0A),
 
   // Function Subset header: length, type, first interface, reserved, subset length
-  U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION), ITF_NUM_CDC, 0, U16_TO_U8S_LE(MS_OS_20_DESC_LEN-0x0A-0x08),
+  U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION), ITF_NUM_NET, 0, U16_TO_U8S_LE(MS_OS_20_DESC_LEN-0x0A-0x08),
 
   // MS OS 2.0 Compatible ID descriptor: length, type, compatible ID, sub compatible ID
   U16_TO_U8S_LE(0x0014), U16_TO_U8S_LE(MS_OS_20_FEATURE_COMPATBLE_ID), 'W', 'I', 'N', 'N', 'C', 'M', 0x00, 0x00,
@@ -415,10 +453,11 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 static char const* string_desc_arr [] =
 {
   [STRID_LANGID]       = (const char[]) { 0x09, 0x04 }, // supported language is English (0x0409)
-  [STRID_MANUFACTURER] = "Red Six",                     // Manufacturer
-  [STRID_PRODUCT]      = "RP2040 USB Portal",           // Product
-  [STRID_SERIAL]       = NULL,                          // Serials will use unique ID if possible
-  [STRID_INTERFACE]    = "RP2040 USB Network"           // Interface Description
+  [STRID_MANUFACTURER]    = "Red Six",           // Manufacturer
+  [STRID_PRODUCT]         = "RP2040 USB Portal", // Product
+  [STRID_SERIAL]          = NULL,                // Serials will use unique ID if possible
+  [STRID_NET_INTERFACE]   = "RP2040 USB Network",
+  [STRID_SERIAL_INTERFACE] = "RP2040 USB Serial"
 
   // STRID_MAC index is handled separately
 };

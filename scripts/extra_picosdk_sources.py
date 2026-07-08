@@ -29,6 +29,7 @@ if framework_dir:
         join("$BUILD_DIR", "TinyUSB"),
         join(framework_dir, "lib", "tinyusb", "src"),
         "-<*> +<tusb.c> +<common/tusb_fifo.c> +<device/*.c> "
+        "+<class/cdc/cdc_device.c> "
         "+<class/net/ecm_rndis_device.c> "
         "+<portable/raspberrypi/rp2040/dcd_rp2040.c> "
         "+<portable/raspberrypi/rp2040/rp2040_usb.c>",

@@ -40,6 +40,11 @@ typedef bool (*rp2040_usb_portal_http_handler_t)(
     rp2040_usb_portal_http_response_t *response,
     void *user_data);
 
+typedef void (*rp2040_usb_portal_serial_rx_handler_t)(
+    const uint8_t *data,
+    size_t len,
+    void *user_data);
+
 typedef struct {
     rp2040_usb_portal_ipv4_t address;
     rp2040_usb_portal_ipv4_t netmask;
@@ -57,10 +62,13 @@ typedef struct {
     bool enable_dhcp_server;
     bool enable_dns_catchall;
     bool enable_http_server;
+    bool enable_serial_bootloader_touch;
     bool initialize_lwip;
     bool initialize_tinyusb;
     rp2040_usb_portal_http_handler_t http_handler;
     void *http_user_data;
+    rp2040_usb_portal_serial_rx_handler_t serial_rx_handler;
+    void *serial_user_data;
 } rp2040_usb_portal_config_t;
 
 void rp2040_usb_portal_config_init(rp2040_usb_portal_config_t *config);
@@ -72,6 +80,9 @@ struct netif *rp2040_usb_portal_netif(void);
 uint32_t rp2040_usb_portal_http_request_count(void);
 const uint8_t *rp2040_usb_portal_mac_address(void);
 void rp2040_usb_portal_ipv4_to_string(rp2040_usb_portal_ipv4_t ip, char *buffer, size_t buffer_len);
+bool rp2040_usb_portal_serial_connected(void);
+size_t rp2040_usb_portal_serial_read(void *buffer, size_t buffer_len);
+size_t rp2040_usb_portal_serial_write(const void *data, size_t len);
 
 #ifdef __cplusplus
 }

@@ -29,6 +29,7 @@ This is a proof of concept. It is not a production USB product identity, securit
 - Can answer all DNS queries with `192.168.4.1`.
 - Provides a small reusable C API around the USB network portal.
 - Can serve a minimal HTTP control page and JSON API through an application callback.
+- Exposes a CDC-ACM virtual serial port by default for diagnostics and upload convenience.
 - Supports multiple USB network personalities selected at compile time.
 
 ## Hardware
@@ -53,9 +54,9 @@ The reusable layer lives in:
 - `include/rp2040_usb_ethernet_portal_config.h`
 - `src/rp2040_usb_ethernet_portal.c`
 
-The application calls `rp2040_usb_portal_config_init()`, optionally changes the returned config, assigns an HTTP handler, calls `rp2040_usb_portal_init()`, then calls `rp2040_usb_portal_task()` from the main loop.
+The application calls `rp2040_usb_portal_config_init()`, optionally changes the returned config, assigns HTTP or serial handlers, calls `rp2040_usb_portal_init()`, then calls `rp2040_usb_portal_task()` from the main loop.
 
-The portal owns the USB network device, LwIP netif, optional DHCP server, optional DNS catch-all, optional basic HTTP server, `/api/bootloader`, and adaptive Windows/Android USB persona switching. Application code owns routes, page content, and any hardware-specific control policy.
+The portal owns the USB network device, CDC-ACM serial function, LwIP netif, optional DHCP server, optional DNS catch-all, optional basic HTTP server, `/api/bootloader`, 1200-baud BOOTSEL touch, and adaptive Windows/Android USB persona switching. Application code owns routes, page content, serial commands, and any hardware-specific control policy.
 
 The active example is `src/example_portal_app.c`.
 
@@ -65,17 +66,19 @@ The recommended default is `pico-portal-auto`.
 
 | Environment | Board | USB behavior | Intended host |
 | --- | --- | --- | --- |
-| `pico-portal-auto` | Raspberry Pi Pico | Adaptive: Android-friendly CDC-ECM first, Windows RNDIS after host probe detection | Windows and Android |
-| `pico-portal-android` | Raspberry Pi Pico | CDC-ECM only | Android |
-| `pico-portal-windows` | Raspberry Pi Pico | CDC-NCM only | Windows |
-| `pico-portal-windows-rndis` | Raspberry Pi Pico | RNDIS | Windows |
-| `kb2040-portal-auto` | Adafruit KB2040 | Adaptive: Android-friendly CDC-ECM first, Windows RNDIS after host probe detection | Windows and Android |
-| `kb2040-portal-android` | Adafruit KB2040 | CDC-ECM only | Android |
-| `kb2040-portal-windows` | Adafruit KB2040 | CDC-NCM only | Windows |
-| `kb2040-portal-windows-rndis` | Adafruit KB2040 | RNDIS | Windows |
+| `pico-portal-auto` | Raspberry Pi Pico | Composite CDC-ACM serial plus adaptive network: Android-friendly CDC-ECM first, Windows RNDIS after host probe detection | Windows, Linux, Android |
+| `pico-portal-auto-network-only` | Raspberry Pi Pico | Adaptive network only, no CDC-ACM serial | Phone compatibility testing |
+| `pico-portal-android` | Raspberry Pi Pico | Composite CDC-ACM serial plus CDC-ECM network | Android/Linux |
+| `pico-portal-windows` | Raspberry Pi Pico | Composite CDC-ACM serial plus CDC-NCM network | Windows |
+| `pico-portal-windows-rndis` | Raspberry Pi Pico | Composite CDC-ACM serial plus RNDIS network | Windows |
+| `kb2040-portal-auto` | Adafruit KB2040 | Composite CDC-ACM serial plus adaptive network: Android-friendly CDC-ECM first, Windows RNDIS after host probe detection | Windows, Linux, Android |
+| `kb2040-portal-auto-network-only` | Adafruit KB2040 | Adaptive network only, no CDC-ACM serial | Phone compatibility testing |
+| `kb2040-portal-android` | Adafruit KB2040 | Composite CDC-ACM serial plus CDC-ECM network | Android/Linux |
+| `kb2040-portal-windows` | Adafruit KB2040 | Composite CDC-ACM serial plus CDC-NCM network | Windows |
+| `kb2040-portal-windows-rndis` | Adafruit KB2040 | Composite CDC-ACM serial plus RNDIS network | Windows |
 | `kb2040-bootsel` | Adafruit KB2040 | BOOTSEL upload profile using `picotool` | Manual USB mass-storage style flashing |
 
-The board selection is intentionally left to PlatformIO's `board = ...` setting. The example does not repeat per-board GPIO declarations. For the demo LED, it uses `PICO_DEFAULT_LED_PIN` when the selected Pico SDK board header provides one. For a board without that macro, either register project-specific pins in the application or add a deliberate build flag such as `-DPORTAL_EXAMPLE_LED_GPIO=10`.
+The Pico and KB2040 profiles build the same portal firmware behavior. They remain separate PlatformIO environments only because the board ID controls board metadata such as flash size, SDK board headers, default LED definitions, and upload details. The example does not repeat per-board GPIO declarations. For the demo LED, it uses `PICO_DEFAULT_LED_PIN` when the selected Pico SDK board header provides one. For a board without that macro, either register project-specific pins in the application or add a deliberate build flag such as `-DPORTAL_EXAMPLE_LED_GPIO=10`.
 
 `platformio.ini` keeps the board and USB behavior choices separate:
 
@@ -83,6 +86,7 @@ The board selection is intentionally left to PlatformIO's `board = ...` setting.
 - `[mode_auto]` is the recommended Windows/Android image. It starts as CDC-ECM for Android, then switches to RNDIS when Windows probing is detected.
 - `[mode_android_ecm]` is CDC-ECM only. Use it when Android/Linux matter and Windows in-box compatibility does not.
 - `[mode_windows_ncm]` is CDC-NCM only. Use it when Windows is the target and the cleaner NCM adapter identity matters.
+- `[mode_network_only]` disables the default CDC-ACM serial function with `-DUSB_PORTAL_ENABLE_CDC_SERIAL=0`.
 - RNDIS has no explicit mode block because it is the default when no `USB_NET_MODE_*` flag is set. Use the `*-windows-rndis` environments as Windows fallbacks or for comparison.
 
 Flash size also comes from the selected PlatformIO board metadata and Pico SDK board header. If a custom board definition is wrong, override both the PlatformIO size check and the SDK macro in that board environment, for example:
@@ -118,6 +122,12 @@ Build the default Pico firmware:
 pio run -e pico-portal-auto
 ```
 
+Build the network-only Pico firmware when testing phone hosts that reject composite USB devices:
+
+```powershell
+pio run -e pico-portal-auto-network-only
+```
+
 Upload to a Raspberry Pi Pico through a Raspberry Pi Debug Probe:
 
 ```powershell
@@ -140,7 +150,7 @@ If `pio` is not on `PATH`, run the same environments from the PlatformIO extensi
 3. Let the host obtain an address by DHCP.
 4. Open `http://192.168.4.1/`.
 
-On Windows with the adaptive profile, the final adapter is expected to be RNDIS. On Android, use the captive-network sign-in notification when it appears.
+On Windows with the adaptive profile, the final adapter is expected to be RNDIS and the same USB device should also expose a COM port. On Linux, the default composite build should appear as a USB Ethernet interface plus a CDC ACM serial device. On Android, use the captive-network sign-in notification when it appears. If a phone does not accept the composite device, try the `*-network-only` environment or build with `-DUSB_PORTAL_ENABLE_CDC_SERIAL=0`.
 
 ## Network Configuration
 
@@ -205,6 +215,27 @@ rp2040_usb_portal_init(&config);
 
 Do not disable DHCP for the plug-and-go portal flow. Without DHCP, the host needs some other way to know the subnet and its own address. If a product already controls host network configuration, the option is there.
 
+## Serial Console
+
+CDC-ACM serial is enabled by default. The library services the serial endpoint from `rp2040_usb_portal_task()` and provides:
+
+- `rp2040_usb_portal_serial_connected()`
+- `rp2040_usb_portal_serial_read()`
+- `rp2040_usb_portal_serial_write()`
+- `rp2040_usb_portal_serial_rx_handler_t`
+
+The example application registers a serial RX handler with these commands:
+
+```text
+help
+state
+led on
+led off
+bootloader
+```
+
+Opening and closing the serial port at 1200 baud schedules a reboot into BOOTSEL. This mirrors the common Arduino-style upload touch behavior while keeping the serial port independent from Pico SDK `stdio_usb`.
+
 ## Migrating From A Wireless AP Portal
 
 This project is meant to replace the network side of a classic embedded WiFi AP portal without forcing the application to become USB-specific.
@@ -249,20 +280,9 @@ Unknown paths redirect to the configured portal IP.
 
 ## Size
 
-Representative PlatformIO build sizes:
+The RP2040 has enough flash and RAM for this proof-of-concept firmware with comfortable margin. The current composite NIC plus CDC-ACM serial builds are well under 100 KiB of flash and use well under half of RP2040 SRAM.
 
-| Environment | Flash bytes | RAM bytes |
-| --- | ---: | ---: |
-| `pico-portal-auto` | 69,576 | 70,308 |
-| `pico-portal-android` | 69,032 | 70,300 |
-| `pico-portal-windows` | 69,352 | 73,060 |
-| `pico-portal-windows-rndis` | 69,116 | 70,300 |
-| `kb2040-portal-auto` | 68,724 | 70,296 |
-| `kb2040-portal-android` | 68,180 | 70,288 |
-| `kb2040-portal-windows` | 68,500 | 73,048 |
-| `kb2040-portal-windows-rndis` | 68,264 | 70,288 |
-
-The adaptive firmware is about 544 bytes larger than the Android-only CDC-ECM profile in these builds. It is about 460 bytes larger than the Windows RNDIS profile on Pico. The CDC-NCM profile uses about 2.7 KiB more RAM than the ECM/RNDIS profiles.
+As a rule of thumb, CDC-ACM serial adds only a few kilobytes of flash and about a kilobyte of RAM versus the network-only adaptive build. CDC-NCM uses a few kilobytes more RAM than the ECM/RNDIS paths because of its transfer buffers.
 
 ## Implementation Notes
 

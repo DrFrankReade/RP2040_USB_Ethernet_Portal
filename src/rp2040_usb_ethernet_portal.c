@@ -42,6 +42,12 @@ static uint32_t http_request_count;
 #if USB_NET_CROSS_PLATFORM
 static bool adaptive_switched_to_windows;
 #endif
+#if CFG_TUD_CDC
+#define SERIAL_RX_BUFFER_SIZE 256u
+static uint8_t serial_rx_buffer[SERIAL_RX_BUFFER_SIZE];
+static uint16_t serial_rx_head;
+static uint16_t serial_rx_tail;
+#endif
 
 uint8_t tud_network_mac_address[6] = {0x02, 0x52, 0x50, 0x32, 0x30, 0x40};
 
@@ -111,9 +117,30 @@ void rp2040_usb_portal_config_init(rp2040_usb_portal_config_t *config) {
     config->enable_dhcp_server = RP2040_USB_PORTAL_ENABLE_DHCP != 0;
     config->enable_dns_catchall = true;
     config->enable_http_server = true;
+    config->enable_serial_bootloader_touch = true;
     config->initialize_lwip = true;
     config->initialize_tinyusb = true;
 }
+
+#if CFG_TUD_CDC
+static void serial_rx_push(uint8_t value) {
+    uint16_t next_head = (uint16_t)((serial_rx_head + 1u) % SERIAL_RX_BUFFER_SIZE);
+    if (next_head == serial_rx_tail) {
+        serial_rx_tail = (uint16_t)((serial_rx_tail + 1u) % SERIAL_RX_BUFFER_SIZE);
+    }
+    serial_rx_buffer[serial_rx_head] = value;
+    serial_rx_head = next_head;
+}
+
+static bool serial_rx_pop(uint8_t *value) {
+    if (serial_rx_head == serial_rx_tail) {
+        return false;
+    }
+    *value = serial_rx_buffer[serial_rx_tail];
+    serial_rx_tail = (uint16_t)((serial_rx_tail + 1u) % SERIAL_RX_BUFFER_SIZE);
+    return true;
+}
+#endif
 
 static void init_mac_address(void) {
     pico_unique_board_id_t board_id;
@@ -228,6 +255,29 @@ static void service_traffic(void) {
     }
 
     sys_check_timeouts();
+}
+
+static void service_serial(void) {
+#if CFG_TUD_CDC
+    uint8_t buffer[64];
+
+    while (tud_cdc_available()) {
+        uint32_t count = tud_cdc_read(buffer, sizeof(buffer));
+        if (count == 0) {
+            break;
+        }
+
+        if (active_config.serial_rx_handler) {
+            active_config.serial_rx_handler(buffer, count, active_config.serial_user_data);
+        } else {
+            for (uint32_t i = 0; i < count; i++) {
+                serial_rx_push(buffer[i]);
+            }
+        }
+    }
+
+    tud_cdc_write_flush();
+#endif
 }
 
 static err_t http_close_connection(struct tcp_pcb *pcb) {
@@ -603,6 +653,7 @@ void rp2040_usb_portal_task(void) {
 #if USB_NET_CROSS_PLATFORM
     service_adaptive_usb_persona();
 #endif
+    service_serial();
     service_traffic();
 
     if (bootloader_requested &&
@@ -627,6 +678,65 @@ uint32_t rp2040_usb_portal_http_request_count(void) {
 const uint8_t *rp2040_usb_portal_mac_address(void) {
     return tud_network_mac_address;
 }
+
+bool rp2040_usb_portal_serial_connected(void) {
+#if CFG_TUD_CDC
+    return tud_ready() && tud_cdc_connected();
+#else
+    return false;
+#endif
+}
+
+size_t rp2040_usb_portal_serial_read(void *buffer, size_t buffer_len) {
+    if (!buffer || buffer_len == 0) {
+        return 0;
+    }
+
+#if CFG_TUD_CDC
+    uint8_t *out = (uint8_t *)buffer;
+    size_t count = 0;
+    while (count < buffer_len && serial_rx_pop(&out[count])) {
+        count++;
+    }
+    return count;
+#else
+    return 0;
+#endif
+}
+
+size_t rp2040_usb_portal_serial_write(const void *data, size_t len) {
+    if (!data || len == 0) {
+        return 0;
+    }
+
+#if CFG_TUD_CDC
+    if (!tud_ready() || !tud_cdc_connected()) {
+        return 0;
+    }
+
+    uint32_t written = tud_cdc_write(data, (uint32_t)len);
+    tud_cdc_write_flush();
+    return written;
+#else
+    return 0;
+#endif
+}
+
+#if CFG_TUD_CDC
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
+    (void)rts;
+
+    if (itf != 0 || dtr || !active_config.enable_serial_bootloader_touch) {
+        return;
+    }
+
+    cdc_line_coding_t coding;
+    tud_cdc_n_get_line_coding(itf, &coding);
+    if (coding.bit_rate == 1200) {
+        rp2040_usb_portal_reboot_to_bootsel(50);
+    }
+}
+#endif
 
 __attribute__((weak)) sys_prot_t sys_arch_protect(void) {
     return 0;

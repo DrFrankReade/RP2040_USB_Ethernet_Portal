@@ -12,11 +12,24 @@
 #define CFG_TUSB_MEM_SECTION
 #define CFG_TUSB_MEM_ALIGN __attribute__((aligned(4)))
 
+#ifndef USB_PORTAL_ENABLE_CDC_SERIAL
+#define USB_PORTAL_ENABLE_CDC_SERIAL 1
+#endif
+
+#if USB_PORTAL_ENABLE_CDC_SERIAL
+#define CFG_TUD_CDC 1
+#else
 #define CFG_TUD_CDC 0
+#endif
+
 #define CFG_TUD_MSC 0
 #define CFG_TUD_HID 0
 #define CFG_TUD_MIDI 0
 #define CFG_TUD_VENDOR 0
+
+#define CFG_TUD_CDC_RX_BUFSIZE 256
+#define CFG_TUD_CDC_TX_BUFSIZE 256
+#define CFG_TUD_CDC_EP_BUFSIZE 64
 
 #ifndef USB_NET_MODE_NCM
 #define USB_NET_MODE_NCM 0
