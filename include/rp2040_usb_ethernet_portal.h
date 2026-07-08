@@ -72,6 +72,7 @@ typedef struct {
 } rp2040_usb_portal_config_t;
 
 void rp2040_usb_portal_config_init(rp2040_usb_portal_config_t *config);
+void rp2040_usb_portal_config_use_link_only(rp2040_usb_portal_config_t *config);
 bool rp2040_usb_portal_init(const rp2040_usb_portal_config_t *config);
 void rp2040_usb_portal_task(void);
 void rp2040_usb_portal_reboot_to_bootsel(uint32_t delay_ms);

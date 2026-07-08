@@ -78,6 +78,19 @@ static bool serial_console_was_connected;
 static bool serial_debug_enabled = PORTAL_EXAMPLE_SERIAL_DEBUG != 0;
 
 /*
+ * Default captive behavior is convenient when the host is offline: Windows,
+ * Android, and similar hosts often open the portal automatically. On Windows
+ * with another active internet connection, that same OS detection path may
+ * open the default browser to a Microsoft/MSN connectivity page instead.
+ *
+ * Set this to true for DHCP link-only behavior. The host still gets an IP
+ * address, but the RP2040 does not advertise itself as a router or DNS server.
+ * In other words, the user or host software opens http://192.168.4.1/
+ * explicitly.
+ */
+static const bool example_link_only = false;
+
+/*
  * A self-contained page keeps the demo easy to flash and inspect. Production
  * projects can serve different routes from the same HTTP callback.
  */
@@ -385,11 +398,13 @@ static bool send_state_response(rp2040_usb_portal_http_response_t *response) {
     size_t used = 0;
     int count = snprintf(json_response_buffer, sizeof(json_response_buffer),
                          "{\"portal\":{\"ip\":\"%s\",\"requests\":%lu,"
-                         "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\"},"
+                         "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+                         "\"linkOnly\":%s},"
                          "\"uptimeMs\":%lu,\"pins\":[",
                          ip,
                          (unsigned long)rp2040_usb_portal_http_request_count(),
                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                         example_link_only ? "true" : "false",
                          (unsigned long)to_ms_since_boot(get_absolute_time()));
     if (count > 0) {
         used = (size_t)count < sizeof(json_response_buffer) ? (size_t)count : sizeof(json_response_buffer) - 1;
@@ -455,11 +470,13 @@ static void serial_print_state(void) {
     snprintf(line, sizeof(line),
              "Portal: http://%s/  requests=%lu  uptime=%lu ms\r\n"
              "MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n"
+             "Network behavior: %s\r\n"
              "Serial debug: %s\r\n",
              ip,
              (unsigned long)rp2040_usb_portal_http_request_count(),
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             example_link_only ? "link-only" : "captive portal",
              serial_debug_enabled ? "on" : "off");
     serial_write_text(line);
 
@@ -676,6 +693,9 @@ int main(void) {
 
     rp2040_usb_portal_config_t config;
     rp2040_usb_portal_config_init(&config);
+    if (example_link_only) {
+        rp2040_usb_portal_config_use_link_only(&config);
+    }
     config.http_handler = handle_example_http_request;
     config.serial_rx_handler = handle_example_serial_rx;
 

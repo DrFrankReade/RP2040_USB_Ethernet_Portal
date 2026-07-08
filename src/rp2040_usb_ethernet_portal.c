@@ -122,6 +122,17 @@ void rp2040_usb_portal_config_init(rp2040_usb_portal_config_t *config) {
     config->initialize_tinyusb = true;
 }
 
+void rp2040_usb_portal_config_use_link_only(rp2040_usb_portal_config_t *config) {
+    if (!config) {
+        return;
+    }
+
+    config->advertise_gateway = false;
+    config->enable_dns_catchall = false;
+    config->dhcp_router = RP2040_USB_PORTAL_IPV4(0, 0, 0, 0);
+    config->dns_server = RP2040_USB_PORTAL_IPV4(0, 0, 0, 0);
+}
+
 #if CFG_TUD_CDC
 static void serial_rx_push(uint8_t value) {
     uint16_t next_head = (uint16_t)((serial_rx_head + 1u) % SERIAL_RX_BUFFER_SIZE);

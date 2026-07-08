@@ -73,9 +73,21 @@
 #define RP2040_USB_PORTAL_ENABLE_DHCP 1
 #endif
 
-/* Android behaved best in testing when DHCP advertised the device as router
- * and DNS, even though the link is only for local portal access. This is used
- * only when the DHCP server is enabled. */
+/* Default captive-style behavior:
+ * - Advertise the device as router and DNS.
+ * - Run DNS catch-all.
+ * This is convenient when the host has no other internet connection because
+ * operating systems tend to open the portal automatically. On Windows with an
+ * existing internet connection, the OS may instead open its default browser to
+ * a Microsoft/MSN connectivity-test page. That is host behavior, not a device
+ * failure.
+ *
+ * Link-only mode is available through rp2040_usb_portal_config_use_link_only().
+ * It keeps DHCP address assignment but does not advertise router or DNS
+ * options and does not run DNS catch-all. In other words, it gives the host a
+ * direct IP link to the RP2040 and expects the user or host software to open
+ * the device address explicitly.
+ */
 #ifndef RP2040_USB_PORTAL_ADVERTISE_GATEWAY
 #define RP2040_USB_PORTAL_ADVERTISE_GATEWAY 1
 #endif

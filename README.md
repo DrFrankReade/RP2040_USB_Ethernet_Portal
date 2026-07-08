@@ -1,50 +1,28 @@
 # RP2040 USB Ethernet Portal
 
-Reusable proof-of-concept firmware for an RP2040 board that enumerates as a USB network adapter, leases the host an IPv4 address by DHCP, answers DNS queries, and serves a captive-style local portal at:
+Proof-of-concept firmware for RP2040 boards that enumerate as a USB network adapter and host a local control page at:
 
 ```text
 http://192.168.4.1/
 ```
 
-The active example page exposes a toggle only for pins explicitly registered by the example application. On a Raspberry Pi Pico, the selected Pico SDK board definition provides `PICO_DEFAULT_LED_PIN`, so the example controls the onboard LED on GPIO 25. Boards that do not define a simple default LED expose no demo output unless the project opts into one.
+In other words, this gives a microcontroller a wired local network link over USB. The host gets an address by DHCP, the RP2040 stays at `192.168.4.1`, and application code can serve HTTP or run its own TCP/UDP protocols without Wi-Fi, passwords, AP mode, or radio setup.
 
-## Current Status
+The example page exposes only explicitly registered pins. On a Raspberry Pi Pico, the board definition supplies `PICO_DEFAULT_LED_PIN`, so the example controls the onboard LED. Other boards expose no demo output unless the project opts into a pin.
 
-The default firmware environment, `both`, has been tested with `[rp2040_board] id = pico` as working on:
-
-- Two Windows hosts.
-- A Pixel 6 running Android 16, using a USB OTG adapter.
-- Raspberry Pi Pico upload through a Raspberry Pi Debug Probe.
-
-On Android, the most reliable user path is the captive-network notification, for example `Sign into network 00:24:53:59:93:25`. Opening that notification loads the portal.
-
-This is a proof of concept. It is not a production USB product identity, security model, or provisioning system.
+Tested so far: Windows, a Pixel 6 running Android 16 with USB OTG, Raspberry Pi Pico, and Adafruit KB2040 builds. This is a proof of concept, not a production USB identity, security model, or provisioning system.
 
 ## What It Does
 
 - Enumerates as a USB network device.
 - Hosts the device at `192.168.4.1/24`.
 - Runs a DHCP server with leases at `192.168.4.2` through `192.168.4.4` by default.
-- Advertises DNS and router options through DHCP for captive-portal behavior.
-- Can answer all DNS queries with `192.168.4.1`.
-- Provides a small reusable C API around the USB network portal.
+- Advertises DNS and router options through DHCP by default for captive-portal behavior.
+- Can answer DNS queries with `192.168.4.1`.
+- Provides a reusable C API around the USB network portal.
 - Can serve a minimal HTTP control page and JSON API through an application callback.
 - Exposes a CDC-ACM virtual serial port by default for diagnostics and upload convenience.
 - Supports multiple USB network personalities selected at compile time.
-
-## Hardware
-
-Development hardware used:
-
-- Raspberry Pi Pico.
-- Raspberry Pi Debug Probe connected to `GND`, `SWDIO`, and `SWCLK`.
-- USB cable from the Pico USB port to the host computer or Android OTG adapter.
-
-Target hardware:
-
-- Adafruit KB2040, or another RP2040 design with a USB device connection.
-
-The Debug Probe UART pins are optional for this firmware. `GND`, `SWDIO`, and `SWCLK` are enough for SWD upload and debug.
 
 ## Library Shape
 
@@ -82,25 +60,9 @@ Set `id = adafruit_kb2040` for the KB2040, or use another PlatformIO RP2040 boar
 | `windows-rndis` | Composite CDC-ACM serial plus RNDIS network | Windows |
 | `bootsel` | Same firmware behavior as `both`, uploaded with `picotool` | Manual USB mass-storage style flashing |
 
-The Pico and KB2040 build the same portal firmware behavior. The selected PlatformIO board ID controls board metadata such as flash size, SDK board headers, default LED definitions, and upload details. The example does not repeat per-board GPIO declarations. For the demo LED, it uses `PICO_DEFAULT_LED_PIN` when the selected Pico SDK board header provides one. For a board without that macro, either register project-specific pins in the application or add a deliberate build flag such as `-DPORTAL_EXAMPLE_LED_GPIO=10`.
+`network-only` means the firmware does not expose the CDC-ACM serial function. It still uses the same network behavior.
 
-`platformio.ini` keeps the board and USB behavior choices separate:
-
-- `[rp2040_board]` names the PlatformIO RP2040 board ID used by all environments.
-- `[usb_both]` is the recommended Windows/Android image. It starts as CDC-ECM for Android, then switches to RNDIS when Windows probing is detected.
-- `[usb_android]` is CDC-ECM only. Use it when Android/Linux matter and Windows in-box compatibility does not.
-- `[usb_windows_ncm]` is CDC-NCM only. Use it when Windows is the target and the cleaner NCM adapter identity matters.
-- `[usb_network_only]` disables the default CDC-ACM serial function with `-DUSB_PORTAL_ENABLE_CDC_SERIAL=0`.
-- RNDIS has no explicit mode block because it is the default when no `USB_NET_MODE_*` flag is set. Use the `windows-rndis` environment as a Windows fallback or for comparison.
-
-Flash size also comes from the selected PlatformIO board metadata and Pico SDK board header. If a custom board definition is wrong, override both the PlatformIO size check and the SDK macro in that board environment, for example:
-
-```ini
-board_upload.maximum_size = 8384512
-build_flags =
-    ${env.build_flags}
-    -DPICO_FLASH_SIZE_BYTES=8388608
-```
+The Pico and KB2040 build the same portal firmware behavior. The selected PlatformIO board ID controls board metadata such as flash size, SDK board headers, default LED definitions, and upload details.
 
 ### Why The Auto Profile Uses RNDIS On Windows
 
@@ -132,7 +94,7 @@ Build the network-only firmware when testing phone hosts that reject composite U
 pio run -e both-network-only
 ```
 
-Upload through a Raspberry Pi Debug Probe:
+Upload using the configured PlatformIO upload protocol:
 
 ```powershell
 pio run -e both -t upload
@@ -162,6 +124,32 @@ If `pio` is not on `PATH`, run the same environments from the PlatformIO extensi
 4. Open `http://192.168.4.1/`.
 
 On Windows with the adaptive profile, the final adapter is expected to be RNDIS and the same USB device should also expose a COM port. On Linux, the default composite build should appear as a USB Ethernet interface plus a CDC ACM serial device. On Android, use the captive-network sign-in notification when it appears. If a phone does not accept the composite device, try the `both-network-only` environment or build with `-DUSB_PORTAL_ENABLE_CDC_SERIAL=0`.
+
+## Portal Launch Behavior
+
+The default behavior is intentionally captive-style. The device advertises itself as router and DNS, runs DNS catch-all, and redirects unknown HTTP paths to the portal. This is very convenient when the host has no other internet connection: Windows and Android often open the portal automatically.
+
+On Windows with another active internet connection, that same OS detection path may open the default browser to a Microsoft/MSN connectivity-test page instead of the RP2040. That is host routing and captive-portal detection behavior, not a device failure.
+
+In other words:
+
+- Offline host: the default mode is usually the nicest path because the portal can open itself.
+- Online Windows host: the default mode may occasionally open a browser page you did not ask for.
+- Link-only mode: no captive launch attempt; open `http://192.168.4.1/` yourself or from host software.
+
+The library helper for link-only mode is:
+
+```c
+rp2040_usb_portal_config_use_link_only(&config);
+```
+
+The example program keeps this as a source-level application choice, not a PlatformIO build profile:
+
+```c
+static const bool example_link_only = false;
+```
+
+Set it to `true` in [src/example_portal_app.c](src/example_portal_app.c) to keep DHCP address assignment but stop advertising the RP2040 as a router or DNS server.
 
 ## Network Configuration
 
@@ -197,13 +185,26 @@ The library does not require every project to behave like a captive portal.
 
 For a full captive portal, keep the defaults, assign `config.http_handler`, and call `rp2040_usb_portal_task()` from the main loop. This gives the host an address by DHCP, catches DNS, and serves the page at `http://192.168.4.1/`.
 
+For a local web UI without captive-portal behavior, use link-only mode:
+
+```c
+rp2040_usb_portal_config_t config;
+rp2040_usb_portal_config_init(&config);
+
+rp2040_usb_portal_config_use_link_only(&config);
+
+rp2040_usb_portal_init(&config);
+```
+
+The HTTP server still runs. The host still gets a DHCP lease. The RP2040 does not advertise itself as the host's router or DNS server.
+
 For a plain USB network interface with DHCP, disable the captive pieces and keep DHCP enabled:
 
 ```c
 rp2040_usb_portal_config_t config;
 rp2040_usb_portal_config_init(&config);
 
-config.enable_dns_catchall = false;
+rp2040_usb_portal_config_use_link_only(&config);
 config.enable_http_server = false;
 
 rp2040_usb_portal_init(&config);
@@ -268,7 +269,7 @@ This project is meant to replace the network side of a classic embedded WiFi AP 
 GET /api/state
 ```
 
-Returns portal state, uptime, request count, MAC address, and the example application's registered pin list.
+Returns portal state, uptime, request count, MAC address, link-only status, and the example application's registered pin list.
 
 ```text
 GET /api/gpio?pin=25&value=1
@@ -290,12 +291,6 @@ GET /api/bootloader
 Returns a response, then reboots the RP2040 into BOOTSEL after a short delay.
 
 Unknown paths redirect to the configured portal IP.
-
-## Size
-
-The RP2040 has enough flash and RAM for this proof-of-concept firmware with comfortable margin. The current composite NIC plus CDC-ACM serial builds are well under 100 KiB of flash and use well under half of RP2040 SRAM.
-
-As a rule of thumb, CDC-ACM serial adds only a few kilobytes of flash and about a kilobyte of RAM versus the network-only adaptive build. CDC-NCM uses a few kilobytes more RAM than the ECM/RNDIS paths because of its transfer buffers.
 
 ## Implementation Notes
 
