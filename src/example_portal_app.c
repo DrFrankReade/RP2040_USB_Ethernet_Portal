@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -30,6 +31,10 @@
 #define EXAMPLE_LED_INVERTED PICO_DEFAULT_LED_PIN_INVERTED
 #else
 #define EXAMPLE_HAS_LED_GPIO 0
+#endif
+
+#ifndef PORTAL_EXAMPLE_SERIAL_DEBUG
+#define PORTAL_EXAMPLE_SERIAL_DEBUG 1
 #endif
 
 typedef enum {
@@ -70,6 +75,7 @@ static char json_response_buffer[1024];
 static char serial_command_buffer[64];
 static size_t serial_command_len;
 static bool serial_console_was_connected;
+static bool serial_debug_enabled = PORTAL_EXAMPLE_SERIAL_DEBUG != 0;
 
 /*
  * A self-contained page keeps the demo easy to flash and inspect. Production
@@ -403,6 +409,24 @@ static void serial_write_text(const char *text) {
     }
 }
 
+static void serial_debugf(const char *format, ...) {
+    if (!serial_debug_enabled || !format || !rp2040_usb_portal_serial_connected()) {
+        return;
+    }
+
+    char message[160];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    char line[208];
+    snprintf(line, sizeof(line), "[%lu ms] %s\r\n",
+             (unsigned long)to_ms_since_boot(get_absolute_time()),
+             message);
+    serial_write_text(line);
+}
+
 static void serial_prompt(void) {
     serial_write_text("> ");
 }
@@ -412,6 +436,8 @@ static void serial_print_help(void) {
         "Commands:\r\n"
         "  help       show this list\r\n"
         "  state      show portal and pin state\r\n"
+        "  debug on   enable serial debug events\r\n"
+        "  debug off  disable serial debug events\r\n"
         "  led on     set the registered output high\r\n"
         "  led off    set the registered output low\r\n"
         "  bootloader reboot to BOOTSEL\r\n");
@@ -428,11 +454,13 @@ static void serial_print_state(void) {
 
     snprintf(line, sizeof(line),
              "Portal: http://%s/  requests=%lu  uptime=%lu ms\r\n"
-             "MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+             "MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n"
+             "Serial debug: %s\r\n",
              ip,
              (unsigned long)rp2040_usb_portal_http_request_count(),
              (unsigned long)to_ms_since_boot(get_absolute_time()),
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             serial_debug_enabled ? "on" : "off");
     serial_write_text(line);
 
     for (size_t i = 0; i < example_pin_count; i++) {
@@ -478,6 +506,10 @@ static void serial_set_first_output(bool value) {
              pin->gpio,
              value ? "HIGH" : "LOW");
     serial_write_text(line);
+    serial_debugf("serial set %s GPIO %u %s",
+                  pin->name,
+                  pin->gpio,
+                  value ? "HIGH" : "LOW");
 }
 
 static void handle_serial_command(char *raw_command) {
@@ -487,11 +519,18 @@ static void handle_serial_command(char *raw_command) {
         serial_print_help();
     } else if (strcmp(command, "state") == 0) {
         serial_print_state();
+    } else if (strcmp(command, "debug on") == 0) {
+        serial_debug_enabled = true;
+        serial_write_text("Serial debug output enabled.\r\n");
+    } else if (strcmp(command, "debug off") == 0) {
+        serial_debug_enabled = false;
+        serial_write_text("Serial debug output disabled.\r\n");
     } else if (strcmp(command, "led on") == 0) {
         serial_set_first_output(true);
     } else if (strcmp(command, "led off") == 0) {
         serial_set_first_output(false);
     } else if (strcmp(command, "bootloader") == 0) {
+        serial_debugf("serial requested BOOTSEL reboot");
         serial_write_text("Rebooting to BOOTSEL.\r\n");
         rp2040_usb_portal_reboot_to_bootsel(250);
     } else {
@@ -543,6 +582,8 @@ static void service_serial_console_banner(void) {
         serial_command_len = 0;
         serial_write_text("\r\nRP2040 USB Portal serial console\r\n");
         serial_print_help();
+        serial_print_state();
+        serial_debugf("serial console connected");
         serial_prompt();
     } else if (!connected) {
         serial_command_len = 0;
@@ -560,17 +601,34 @@ static bool handle_gpio_api_request(const rp2040_usb_portal_http_request_t *requ
     example_pin_t *pin = has_pin ? find_registered_pin(pin_number) : first_registered_output_pin();
 
     if (!pin) {
+        if (has_pin) {
+            serial_debugf("HTTP GPIO rejected: GPIO %u is not registered", pin_number);
+        } else {
+            serial_debugf("HTTP GPIO rejected: no registered output pin");
+        }
         return send_error_response(response, "404 Not Found", "pin is not registered");
     }
 
     if (has_value) {
         if (pin->mode != EXAMPLE_PIN_OUTPUT) {
+            serial_debugf("HTTP GPIO rejected: %s GPIO %u is %s, not out",
+                          pin->name,
+                          pin->gpio,
+                          pin_mode_name(pin->mode));
             return send_error_response(response, "403 Forbidden", "pin is not configured as an output");
         }
         if (value > 1) {
+            serial_debugf("HTTP GPIO rejected: %s GPIO %u invalid value %u",
+                          pin->name,
+                          pin->gpio,
+                          value);
             return send_error_response(response, "400 Bad Request", "output value must be 0 or 1");
         }
         write_registered_pin(pin, value != 0);
+        serial_debugf("HTTP set %s GPIO %u %s",
+                      pin->name,
+                      pin->gpio,
+                      value ? "HIGH" : "LOW");
     }
 
     uint16_t read_value = read_registered_pin(pin);
@@ -586,11 +644,13 @@ static bool handle_example_http_request(const rp2040_usb_portal_http_request_t *
     (void)user_data;
 
     if (strcmp(request->method, "GET") != 0) {
+        serial_debugf("HTTP rejected method %s for %s", request->method, request->path);
         return send_error_response(response, "405 Method Not Allowed", "method not allowed");
     }
 
     if (strcmp(request->path, "/") == 0 ||
         strcmp(request->path, "/index.html") == 0) {
+        serial_debugf("HTTP served portal page");
         response->status = "200 OK";
         response->content_type = "text/html; charset=utf-8";
         response->body = portal_page_html;
@@ -606,6 +666,7 @@ static bool handle_example_http_request(const rp2040_usb_portal_http_request_t *
         return handle_gpio_api_request(request, response);
     }
 
+    serial_debugf("HTTP route miss: %s", request->path);
     return false;
 }
 
